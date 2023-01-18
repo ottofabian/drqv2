@@ -3,9 +3,11 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 import warnings
+
 warnings.filterwarnings('ignore', category=DeprecationWarning)
 
 import os
+
 os.environ['MKL_SERVICE_FORCE_INTEL'] = '1'
 os.environ['MUJOCO_GL'] = 'egl'
 
@@ -76,7 +78,6 @@ class Workspace:
         self.train_video_recorder = TrainVideoRecorder(
             self.work_dir if self.cfg.save_train_video else None)
 
-
     @property
     def global_step(self):
         return self._global_step
@@ -101,7 +102,8 @@ class Workspace:
 
         while eval_until_episode(episode):
             time_step = self.eval_env.reset()
-            self.video_recorder.init(self.eval_env, enabled=(episode == 0))
+            # self.video_recorder.init(self.eval_env, enabled=(episode == 0))
+            self.video_recorder.init(self.eval_env, enabled=False)
             while not time_step.last():
                 with torch.no_grad(), utils.eval_mode(self.agent):
                     action = self.agent.act(time_step.observation,

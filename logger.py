@@ -6,9 +6,7 @@ import csv
 import datetime
 from collections import defaultdict
 
-import numpy as np
 import torch
-import torchvision
 from termcolor import colored
 from torch.utils.tensorboard import SummaryWriter
 

@@ -195,8 +195,11 @@ class DrQV2Agent:
             metrics['critic_loss'] = critic_loss.item()
 
         # optimize encoder and critic
-        self.encoder_opt.zero_grad(set_to_none=True)
-        self.critic_opt.zero_grad(set_to_none=True)
+        # TODO
+        # self.encoder_opt.zero_grad(set_to_none=True)
+        # self.critic_opt.zero_grad(set_to_none=True)
+        self.encoder_opt.zero_grad()
+        self.critic_opt.zero_grad()
         critic_loss.backward()
         self.critic_opt.step()
         self.encoder_opt.step()
@@ -216,7 +219,9 @@ class DrQV2Agent:
         actor_loss = -Q.mean()
 
         # optimize actor
-        self.actor_opt.zero_grad(set_to_none=True)
+        # TODO
+        self.actor_opt.zero_grad()
+        # self.actor_opt.zero_grad(set_to_none=True)
         actor_loss.backward()
         self.actor_opt.step()
 
