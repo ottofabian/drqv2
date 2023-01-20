@@ -4,6 +4,8 @@
 # LICENSE file in the root directory of this source tree.
 import warnings
 
+from mbrl_envs import ObsTypes
+
 warnings.filterwarnings('ignore', category=DeprecationWarning)
 
 import os
@@ -27,8 +29,8 @@ from video import TrainVideoRecorder, VideoRecorder
 torch.backends.cudnn.benchmark = True
 
 
-def make_agent(obs_spec, action_spec, cfg):
-    cfg.obs_shape = obs_spec.shape
+def make_agent(obs_specs, action_spec, cfg):
+    cfg.obs_shape = {k: spec.shape for k, spec in obs_specs.items()}
     cfg.action_shape = action_spec.shape
     return hydra.utils.instantiate(cfg)
 
@@ -53,11 +55,14 @@ class Workspace:
     def setup(self):
         # create logger
         self.logger = Logger(self.work_dir, use_tb=self.cfg.use_tb)
+        self.cfg.obs_type = ObsTypes[self.cfg.obs_type.upper()]
         # create envs
         self.train_env = dmc.make(self.cfg.task_name, self.cfg.frame_stack,
-                                  self.cfg.action_repeat, self.cfg.seed)
+                                  self.cfg.action_repeat, self.cfg.seed,
+                                  self.cfg.obs_type, self.cfg.pixels_key)
         self.eval_env = dmc.make(self.cfg.task_name, self.cfg.frame_stack,
-                                 self.cfg.action_repeat, self.cfg.seed)
+                                 self.cfg.action_repeat, self.cfg.seed,
+                                 self.cfg.obs_type, self.cfg.pixels_key)
         # create replay buffer
         data_specs = (self.train_env.observation_spec(),
                       self.train_env.action_spec(),

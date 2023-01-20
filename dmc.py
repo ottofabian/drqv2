@@ -2,9 +2,11 @@
 #
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
+import collections
+import copy
 from collections import deque
-from typing import Any, NamedTuple
-
+from typing import Any, NamedTuple, Tuple, Union
+from gym import spaces
 import dm_env
 import gym
 import mbrl_envs
@@ -14,6 +16,7 @@ from dm_control.suite.wrappers import action_scale, pixels
 from dm_env import StepType, specs
 from dm_env._environment import TimeStep
 from mbrl_envs import ObsTypes
+from mbrl_envs.dmc.dmc_mbrl_env import DMCMBRLEnv
 
 
 class ExtendedTimeStep(NamedTuple):
@@ -83,17 +86,20 @@ class FrameStackWrapper(dm_env.Environment):
         # remove batch dim
         if len(pixels_shape) == 4:
             pixels_shape = pixels_shape[1:]
-        self._obs_spec = specs.BoundedArray(shape=np.concatenate(
+
+        self._obs_spec = copy.deepcopy(env.observation_spec())
+        self._obs_spec[pixels_key] = specs.BoundedArray(shape=np.concatenate(
             [[pixels_shape[2] * num_frames], pixels_shape[:2]], axis=0),
             dtype=np.uint8,
             minimum=0,
             maximum=255,
-            name='observation')
+            name=pixels_key)
 
     def _transform_observation(self, time_step):
         assert len(self._frames) == self._num_frames
-        obs = np.concatenate(list(self._frames), axis=0)
-        return time_step._replace(observation=obs)
+        pixels = np.concatenate(list(self._frames), axis=0)
+        time_step.observation[self._pixels_key] = pixels
+        return time_step
 
     def _extract_pixels(self, time_step):
         pixels = time_step.observation[self._pixels_key]
@@ -184,42 +190,49 @@ class ExtendedTimeStepWrapper(dm_env.Environment):
         return getattr(self._env, name)
 
 
-def make(name, frame_stack, action_repeat, seed, obs_type: ObsTypes = ObsTypes.IMAGE):
+def make(name, frame_stack, action_repeat, seed, obs_type: ObsTypes, pixels_key):
     domain, task = name.split('_', 1)
     # overwrite cup to ball_in_cup
     domain = dict(cup='ball_in_cup').get(domain, domain)
     # make sure reward is not visualized
-    if (domain, task) in suite.ALL_TASKS:
-        # env = suite.load(domain,
-        #                  task,
-        #                  task_kwargs={'random': seed},
-        #                  visualize_reward=False)
-        pixels_key = 'pixels'
-    else:
-        # name = f'{domain}_{task}_vision'
-        # env = manipulation.load(name, seed=seed)
-        pixels_key = 'front_close'
+    # if (domain, task) in suite.ALL_TASKS:
+    #     # env = suite.load(domain,
+    #     #                  task,
+    #     #                  task_kwargs={'random': seed},
+    #     #                  visualize_reward=False)
+    #     pixels_key = 'image'
+    # else:
+    #     # name = f'{domain}_{task}_vision'
+    #     # env = manipulation.load(name, seed=seed)
+    #     pixels_key = 'front_close'
 
     env = mbrl_envs.make(domain, task, seed, obs_type, action_repeat=action_repeat, img_size=(84, 84))
-    gym.Ac
-    env = Gym2DM_Control(env)
+    env = Gym2DM_Control(env, obs_type)
     # add wrappers
     env = ActionDTypeWrapper(env, np.float32)
     # TODO Propreception dtype wrapper
     # env = ActionRepeatWrapper(env, action_repeat)
     # env = action_scale.Wrapper(env, minimum=-1.0, maximum=+1.0)
     # add renderings for clasical tasks
-    if (domain, task) in suite.ALL_TASKS:
-        # zoom in camera for quadruped
-        camera_id = dict(quadruped=2).get(domain, 0)
-        render_kwargs = dict(height=84, width=84, camera_id=camera_id)
-        env = pixels.Wrapper(env,
-                             pixels_only=True,
-                             render_kwargs=render_kwargs)
+    # if (domain, task) in suite.ALL_TASKS:
+    #     # zoom in camera for quadruped
+    #     camera_id = dict(quadruped=2).get(domain, 0)
+    #     render_kwargs = dict(height=84, width=84, camera_id=camera_id)
+    #     env = pixels.Wrapper(env,
+    #                          pixels_only=True,
+    #                          render_kwargs=render_kwargs)
     # stack several frames
     env = FrameStackWrapper(env, frame_stack, pixels_key)
     env = ExtendedTimeStepWrapper(env)
     return env
+
+
+def box_to_spec(box: spaces.Box, **kwargs):
+    low = box.low
+    high = box.high
+    dtype = box.dtype
+    shape = box.shape
+    return specs.BoundedArray(shape, dtype, low, high, **kwargs)
 
 
 class ObsDtypeWrapper(dm_env.Environment):
@@ -254,19 +267,47 @@ class ObsDtypeWrapper(dm_env.Environment):
 
 class Gym2DM_Control(dm_env.Environment):
 
-    def __init__(self, env: gym.Env):
+    def __init__(self, env: DMCMBRLEnv, obs_type: ObsTypes):
         self._env = env
+        # self._obs_type = obs_type
+        self._obs_keys = obs_type.split('_')
+
+        observation_specs = collections.OrderedDict()
+        for k, box in zip(self._obs_keys, self._env.observation_space):
+            observation_specs[k] = box_to_spec(box, name=k)
+        self._observation_spec = observation_specs
+        self._action_spec = box_to_spec(self._env.action_space, name='action')
 
     def reset(self) -> TimeStep:
-        obs, info = self._env.reset()
-
-        TimeStep(info['step_type'], )
+        obs, _ = self._env.reset()
+        observation = collections.OrderedDict()
+        for k, o in zip(self._obs_keys, obs):
+            observation[k] = o
+        return TimeStep(StepType.FIRST, None, None, observation)
 
     def step(self, action) -> TimeStep:
-        pass
+
+        obs, reward, terminated, truncated, info = self._env.step(action)
+
+        observation = collections.OrderedDict()
+        for k, o in zip(self._obs_keys, obs):
+            observation[k] = o
+
+        step_type = StepType.MID
+        discount = 1.0
+
+        if terminated or truncated:
+            step_type = StepType.LAST
+            discount = 0.0
+
+            if truncated:
+                physics = self._env._base_env.physics
+                discount = self._env._base_env._env._task.get_termination(physics) or 1.0
+
+        return TimeStep(step_type, reward, discount, observation)
 
     def observation_spec(self):
-        pass
+        return self._observation_spec
 
     def action_spec(self):
-        pass
+        return self._action_spec

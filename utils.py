@@ -2,6 +2,7 @@
 #
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
+import collections
 import random
 import re
 import time
@@ -43,8 +44,15 @@ def soft_update_params(net, target_net, tau):
                                 (1 - tau) * target_param.data)
 
 
-def to_torch(xs, device):
-    return tuple(torch.as_tensor(x, device=device) for x in xs)
+def to_torch(xs, device, dtype=torch.float32):
+    out = []
+    for x in xs:
+        if isinstance(x, dict):
+            k, v = zip(*x.items())
+            out.append(collections.OrderedDict(zip(k, to_torch(v, device))))
+        else:
+            out.append(torch.as_tensor(x, device=device, dtype=dtype))
+    return tuple(out)
 
 
 def weight_init(m):

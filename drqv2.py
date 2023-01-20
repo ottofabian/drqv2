@@ -2,6 +2,9 @@
 #
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
+import collections
+import copy
+
 import hydra
 import numpy as np
 import torch
@@ -46,13 +49,17 @@ class RandomShiftsAug(nn.Module):
 
 
 class Encoder(nn.Module):
-    def __init__(self, obs_shape):
+    def __init__(self, obs_shape, pixels_key):
         super().__init__()
 
-        assert len(obs_shape) == 3
-        self.repr_dim = 32 * 35 * 35
+        self._pixels_key = pixels_key
+        self.repr_dim = copy.deepcopy(obs_shape)
+        self.repr_dim[self._pixels_key] = (32 * 35 * 35,)
 
-        self.convnet = nn.Sequential(nn.Conv2d(obs_shape[0], 32, 3, stride=2),
+        pixels_shape = obs_shape[self._pixels_key]
+        assert len(pixels_shape) == 3
+
+        self.convnet = nn.Sequential(nn.Conv2d(pixels_shape[0], 32, 3, stride=2),
                                      nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
                                      nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
                                      nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
@@ -61,20 +68,31 @@ class Encoder(nn.Module):
         self.apply(utils.weight_init)
 
     def forward(self, obs):
-        obs = obs / 255.0 - 0.5
-        h = self.convnet(obs)
+        pixels = obs.pop(self._pixels_key)
+        pixels = pixels / 255.0 - 0.5
+        h = self.convnet(pixels)
         h = h.view(h.shape[0], -1)
-        return h
+
+        all_h = collections.OrderedDict({self._pixels_key: h}, **obs)
+        return all_h
 
 
 class Actor(nn.Module):
-    def __init__(self, repr_dim, action_shape, feature_dim, hidden_dim):
+    def __init__(self, repr_dim, action_shape, feature_dim, hidden_dim, pixels_key):
         super().__init__()
 
-        self.trunk = nn.Sequential(nn.Linear(repr_dim, feature_dim),
-                                   nn.LayerNorm(feature_dim), nn.Tanh())
+        self._pixels_key = pixels_key
 
-        self.policy = nn.Sequential(nn.Linear(feature_dim, hidden_dim),
+        # self.trunk = nn.Sequential(nn.Linear(repr_dim[pixels_key], feature_dim),
+        #                            nn.LayerNorm(feature_dim), nn.Tanh())
+
+        # self.trunk = collections.OrderedDict()
+        self.trunk = nn.ModuleDict()
+        for k, shape in repr_dim.items():
+            self.trunk[k] = nn.Sequential(nn.Linear(shape[0], feature_dim),
+                                          nn.LayerNorm(feature_dim), nn.Tanh())
+
+        self.policy = nn.Sequential(nn.Linear(feature_dim * len(self.trunk), hidden_dim),
                                     nn.ReLU(inplace=True),
                                     nn.Linear(hidden_dim, hidden_dim),
                                     nn.ReLU(inplace=True),
@@ -83,9 +101,14 @@ class Actor(nn.Module):
         self.apply(utils.weight_init)
 
     def forward(self, obs, std):
-        h = self.trunk(obs)
 
-        mu = self.policy(h)
+        h = []
+        for k, v in obs.items():
+            h.append(self.trunk[k](v))
+
+        h_concat = torch.concat(h, dim=-1)
+
+        mu = self.policy(h_concat)
         mu = torch.tanh(mu)
         std = torch.ones_like(mu) * std
 
@@ -94,27 +117,41 @@ class Actor(nn.Module):
 
 
 class Critic(nn.Module):
-    def __init__(self, repr_dim, action_shape, feature_dim, hidden_dim):
+    def __init__(self, repr_dim, action_shape, feature_dim, hidden_dim, pixels_key):
         super().__init__()
 
-        self.trunk = nn.Sequential(nn.Linear(repr_dim, feature_dim),
-                                   nn.LayerNorm(feature_dim), nn.Tanh())
+        self._pixels_key = pixels_key
+
+        # self.trunk = nn.Sequential(nn.Linear(repr_dim[pixels_key], feature_dim),
+        #                            nn.LayerNorm(feature_dim), nn.Tanh())
+
+        # self.trunk = collections.OrderedDict()
+        self.trunk = nn.ModuleDict()
+        for k, shape in repr_dim.items():
+            self.trunk[k] = nn.Sequential(nn.Linear(shape[0], feature_dim),
+                                          nn.LayerNorm(feature_dim), nn.Tanh())
 
         self.Q1 = nn.Sequential(
-            nn.Linear(feature_dim + action_shape[0], hidden_dim),
+            nn.Linear(feature_dim * len(self.trunk) + action_shape[0], hidden_dim),
             nn.ReLU(inplace=True), nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(inplace=True), nn.Linear(hidden_dim, 1))
 
         self.Q2 = nn.Sequential(
-            nn.Linear(feature_dim + action_shape[0], hidden_dim),
+            nn.Linear(feature_dim * len(self.trunk) + action_shape[0], hidden_dim),
             nn.ReLU(inplace=True), nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(inplace=True), nn.Linear(hidden_dim, 1))
 
         self.apply(utils.weight_init)
 
     def forward(self, obs, action):
-        h = self.trunk(obs)
-        h_action = torch.cat([h, action], dim=-1)
+        h = []
+        for k, v in obs.items():
+            h.append(self.trunk[k](v))
+
+        h.append(action)
+        h_action = torch.cat(h, dim=-1)
+
+        # h_action = torch.cat([h_concat, action], dim=-1)
         q1 = self.Q1(h_action)
         q2 = self.Q2(h_action)
 
@@ -124,7 +161,7 @@ class Critic(nn.Module):
 class DrQV2Agent:
     def __init__(self, obs_shape, action_shape, device, lr, feature_dim,
                  hidden_dim, critic_target_tau, num_expl_steps,
-                 update_every_steps, stddev_schedule, stddev_clip, use_tb):
+                 update_every_steps, stddev_schedule, stddev_clip, use_tb, pixels_key):
         self.device = device
         self.critic_target_tau = critic_target_tau
         self.update_every_steps = update_every_steps
@@ -133,15 +170,17 @@ class DrQV2Agent:
         self.stddev_schedule = stddev_schedule
         self.stddev_clip = stddev_clip
 
+        self.pixels_key = pixels_key
+
         # models
-        self.encoder = Encoder(obs_shape).to(device)
+        self.encoder = Encoder(obs_shape, pixels_key).to(device)
         self.actor = Actor(self.encoder.repr_dim, action_shape, feature_dim,
-                           hidden_dim).to(device)
+                           hidden_dim, pixels_key).to(device)
 
         self.critic = Critic(self.encoder.repr_dim, action_shape, feature_dim,
-                             hidden_dim).to(device)
+                             hidden_dim, pixels_key).to(device)
         self.critic_target = Critic(self.encoder.repr_dim, action_shape,
-                                    feature_dim, hidden_dim).to(device)
+                                    feature_dim, hidden_dim, pixels_key).to(device)
         self.critic_target.load_state_dict(self.critic.state_dict())
 
         # optimizers
@@ -162,8 +201,9 @@ class DrQV2Agent:
         self.critic.train(training)
 
     def act(self, obs, step, eval_mode):
-        obs = torch.as_tensor(obs, device=self.device)
-        obs = self.encoder(obs.unsqueeze(0))
+        for k, v in obs.items():
+            obs[k] = torch.as_tensor(v, device=self.device, dtype=torch.float32).unsqueeze(0)
+        obs = self.encoder(obs)
         stddev = utils.schedule(self.stddev_schedule, step)
         dist = self.actor(obs, stddev)
         if eval_mode:
@@ -243,8 +283,8 @@ class DrQV2Agent:
             batch, self.device)
 
         # augment
-        obs = self.aug(obs.float())
-        next_obs = self.aug(next_obs.float())
+        obs[self.pixels_key] = self.aug(obs[self.pixels_key])
+        next_obs[self.pixels_key] = self.aug(next_obs[self.pixels_key])
         # encode
         obs = self.encoder(obs)
         with torch.no_grad():
@@ -258,7 +298,9 @@ class DrQV2Agent:
             self.update_critic(obs, action, reward, discount, next_obs, step))
 
         # update actor
-        metrics.update(self.update_actor(obs.detach(), step))
+        for k, v in obs.items():
+            obs[k] = v.detach()
+        metrics.update(self.update_actor(obs, step))
 
         # update critic target
         utils.soft_update_params(self.critic, self.critic_target,

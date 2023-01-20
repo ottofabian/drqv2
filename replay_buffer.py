@@ -2,11 +2,13 @@
 #
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
+import collections
 import datetime
 import io
 import random
 import traceback
 from collections import defaultdict
+from operator import itemgetter
 
 import numpy as np
 import torch
@@ -45,18 +47,33 @@ class ReplayBufferStorage:
     def __len__(self):
         return self._num_transitions
 
+    def _add_value(self, value, spec):
+        if np.isscalar(value):
+            value = np.full(spec.shape, value, spec.dtype)
+        assert spec.shape == value.shape and spec.dtype == value.dtype
+        self._current_episode[spec.name].append(value)
+
     def add(self, time_step):
         for spec in self._data_specs:
-            value = time_step[spec.name]
-            if np.isscalar(value):
-                value = np.full(spec.shape, value, spec.dtype)
-            assert spec.shape == value.shape and spec.dtype == value.dtype
-            self._current_episode[spec.name].append(value)
+            if isinstance(spec, dict):
+                for elem in spec.values():
+                    value = time_step.observation[elem.name]
+                    self._add_value(value, elem)
+            else:
+                value = time_step[spec.name]
+                self._add_value(value, spec)
+
         if time_step.last():
             episode = dict()
             for spec in self._data_specs:
-                value = self._current_episode[spec.name]
-                episode[spec.name] = np.array(value, spec.dtype)
+                if isinstance(spec, dict):
+                    for elem in spec.values():
+                        value = self._current_episode[elem.name]
+                        episode[elem.name] = np.array(value, elem.dtype)
+                else:
+                    value = self._current_episode[spec.name]
+                    episode[spec.name] = np.array(value, spec.dtype)
+
             self._current_episode = defaultdict(list)
             self._store_episode(episode)
 
@@ -148,9 +165,16 @@ class ReplayBuffer(IterableDataset):
         episode = self._sample_episode()
         # add +1 for the first dummy transition
         idx = np.random.randint(0, episode_len(episode) - self._nstep + 1) + 1
-        obs = episode['observation'][idx - 1]
+
+        obs = collections.OrderedDict()
+        next_obs = collections.OrderedDict()
+        obs_keys = episode.keys() - {'action', 'reward', 'discount'}
+        for k in obs_keys:
+            obs[k] = episode[k][idx - 1]
+            next_obs[k] = episode[k][idx + self._nstep - 1]
+        # obs = episode['observation'][idx - 1]
+        # next_obs = episode['observation'][idx + self._nstep - 1]
         action = episode['action'][idx]
-        next_obs = episode['observation'][idx + self._nstep - 1]
         reward = np.zeros_like(episode['reward'][idx])
         discount = np.ones_like(episode['discount'][idx])
         for i in range(self._nstep):
